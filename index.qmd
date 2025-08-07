@@ -1,0 +1,449 @@
+---
+title: "Tiered Discount Rates in Massachusetts"
+subtitle: "A methodology for analyzing the cost-benefit of the DPU's proposed TDR program"
+date: 2025-06-23
+author:
+  - name: Alex Smith
+    email: alex@switch.box
+    affiliations:
+      - Switchbox
+  - name: Juan-Pablo Velez
+    orcid: 0009-0000-5203-1536
+    email: jpv@switch.box
+    affiliations:
+      - Switchbox
+
+keywords: 
+  - energy burden
+  - tiered discount program
+  - rate design
+  - massachusetts
+
+
+bibliography: ../references.bib
+license: "CC BY-NC"
+
+toc: true
+notebook-links: true
+reference-location: margin
+fig-cap: true
+fig-cap-location: margin
+tbl-cap-location: margin
+
+appendix-style: default
+citation-location: document
+citation:
+  container-title: Switchbox
+---
+
+```{r}
+library(tidyverse)
+library(scales)
+library(gt)
+library(gtExtras)
+
+# Import variables
+load(file = "/workspaces/reports/src/ma_lmi_discounts/report_variables.RData")
+```
+
+# Introduction
+
+### Massachusetts' energy affordability crisis
+Energy affordability has emerged as a critical challenge in Massachusetts, prompting state officials to address the growing energy burden on low- and moderate-income households. 
+
+Governor Healey recently unveiled the **Energy Affordability, Independence & Innovation Act**, which aims to save ratepayers $10 billion over 10 years. This legislative push reflects the administration's recognition that "Massachusetts families and businesses can't afford big energy price spikes now, or in the future."[^affordability]
+
+[^affordability]: See [press release](https://www.mass.gov/news/governor-healey-unveils-energy-affordability-independence-innovation-act-to-save-ratepayers-10-billion.)  from the Governor's office announcing the new legislation [@mass.gov_GovernorHealeyUnveils_2025]
+
+To further improve energy affordability across the state, the Department of Public Utilities (DPU) has opened an inquiry to consider improvements to existing affordability programs, “including the availability and design of rate discounts—to reduce the energy burden that may adversely affect certain utility customers.”[^lmidiscounts] 
+
+[^lmidiscounts]: See the [DPU's memo](https://www.documentcloud.org/documents/25982526-24-15-memo-on-tdr-model-and-tech-conference/) on proposed tiered discount program [@dpu_Docket2415Memo_2025].
+
+### The current LMI discount program
+
+Investor-owned utilities in the Commonwealth already provide discounts on electric and gas bills to low- and moderate-income (LMI) households. 
+
+To be eligible for these discounted rates, LMI households must have an annual income of less than 60% of the state median income (for same-sized households). 
+
+Upon enrolling in the discount program, customers receive a 32-42% reduction on their electric bills, depending on their electric utility, and a 25% discount on their gas bills (assuming they are gas utility customers).
+
+::: column-margin
+| HEAP Tier | Income Level |
+|-----------|--------------|
+| Lowest tier | Less than 100% FPL |
+| Middle tier | 100%-200% FPL |
+| Highest tier | 200% FPL to 60% SMI |
+| Non-LMI | Greater than 60% SMI |
+
+: HEAP Tier Definitions. FPL = federal poverty level, SMI = state median income. {#tbl-heap-tiers}
+
+:::
+
+### The proposed Tiered Discount Rate program
+
+Rather than offering all eligible households the same *discount rate*, the DPU's proposal for a new **Tiered Discount Rate (TDR)** program would increase these discounts for lower-income households.
+
+Specifically, the discount rate would be set according to the household's HEAP tier (defined in @tbl-heap-tiers):  
+
+- The **highest tier** would retain the discount rates currently offered to all LMI customers by their electric and gas utilities.
+- The **middle tiers** would have a new rate equal to the average of the lowest and highest discount rates.[^middletiers]
+- The **lowest tier** discount rates would be set at whatever level would allow households in this tier to spend less than 2% of their annual income on electricity, and less than 2% on gas for a total energy burden of 4%.[^gasrateheating]
+
+[^gasrateheating]: Assuming the gas is used for heating. The target would be 0.5% for non-heating gas customers.
+
+[^middletiers]: Since under the DPU’s proposal  all four middle HEAP tiers would receive the same discount rate under this proposal, we group them into a single "middle" tier.
+
+In other words, the DPU is proposing to increase the discount rates for both the lowest and middle tiers, and to set these rates at a level that would allow households in the _lowest_ tier to achieve a **target energy burden**. 
+
+The Department has not specified a target burden for the middle or upper tiers.[^definition]
+
+[^definition]: For more details, see [p. 2](https://www.documentcloud.org/documents/25982526-24-15-memo-on-tdr-model-and-tech-conference/#document/p2/a2662360) of 24-15 TDR Model attached to the Hearing Officers' May 15, 2025 memorandum [@dpu_Docket2415Memo_2025].
+
+### Limitations of the DPU's TDR model
+
+To help stakeholders comment on what discount rate should be selected for the lowest tier, and on their methodology in general, the DPU has published a spreadsheet model of the TDR program.[^dpumodel]
+
+[^dpumodel]: The DPU's Excel-based TDR model is available [here](https://docs.google.com/spreadsheets/d/1UCdkC6iVX1HepkySUm93S1h4VYK7-5rV/edit?gid=1020366958#gid=1020366958) [@dpu_Docket2415TDR_2025].
+
+However, the DPU’s model does not provide a complete picture of program effectiveness. While it outputs a reasonable estimate of the total TDR program _cost_, it does not quantify the _benefit_. 
+
+Specifically, the DPU's model does not answer this crucial question: given a specific lowest-tier discount rate, what percentage of lowest-tier households would actually end up under the 4% **target energy burden**?
+
+The TDR model's limitations arise from its overly generalized assumptions. In evaluating the impact of particular discount rates, the model assumes that all homes in the lowest tier have two occupants, an income of $10,220, and annual energy consumption equal to the tier's average.
+
+Due to the wide variation in energy burdens among lowest-tier households, however, a discount rate that puts this "average" household below the target energy burden may leave many others well above it.
+
+In other words: the current TDR model does not reveal the extent to which proposed discount rates actually achieve the DPU's affordability goal.
+
+### Data-driven cost-benefit analysis
+
+Instead, we propose that the Department consider performing a **data-driven cost-benefit analysis** of the TDR program, using electric and gas load curves tied to household income levels. 
+
+This approach would enable the DPU to evaluate the full *distributional impact* of any given program design: the energy affordability benefits that would be enjoyed by LMI customers, and the incremental program costs that would be borne by non-LMI customers. 
+
+Moreover, policymakers would be able to see the full spectrum of *trade-offs* involved in choosing a discount rate: 
+
+- What level would move the needle on energy affordability? 
+- Would the resulting cost be acceptable? 
+- Would higher discounts achieve diminishing returns?
+
+With a shared understanding of the benefits achieved and costs incurred at each discount rate level, the DPU could engage stakeholders in a concrete conversation about trade-offs.
+ 
+For instance, the DPU has asked stakeholders whether a 4% energy burden provides “an appropriate balance between: (a) providing rate relief to the lowest income customers; and (b) the corresponding bill impacts on all other customers,” a question that  cannot be answered without knowing _how much_ rate relief would be provided by any given discount rate, and at _what cost_.[^stakeholders]
+
+[^stakeholders]: See [p. 7](https://legacy.www.documentcloud.org/documents/25982526-24-15-memo-on-tdr-model-and-tech-conference/#document/p7/a2662622) of the DPU's May 2025 memo [@dpu_Docket2415Memo_2025].
+
+This memo does not deliver a complete data-driven cost-benefit analysis of the DPU's entire TDR proposal. To illustrate this more robust approach, we apply the methodology to a single electric and a single gas utility—both National Grid—and present the trade-offs between the benefits and costs of the program as the discount rate increases.  National Grid was selected because they serve one of the largest customer bases in the state.
+
+We encourage the DPU to adopt this methodology to guide their design of the TDR program.
+
+# Findings 
+
+## How diverse are energy burdens in the lowest tier?
+
+The main limitation of the DPU's current TDR model is that it does not take into account the diversity of energy burdens across households in the lowest HEAP tier.
+
+@fig-dist-energy-burdens-current shows the estimated distribution of energy burdens for National Grid electricity and gas customers in the lowest tier—assuming 100% participation in the current LMI discount program.[^methods_eb]
+
+[^methods_eb]: For more details on how we calculated energy burdens, see [energy usage](#sec-energy-usage-data) and [income assignment](#sec-income-assignment) methods in the appendix. 
+
+:::{.column-page-inset-right}
+{{< embed notebooks/analysis.qmd#fig-dist-energy-burdens-current >}}
+:::
+
+Currently, nearly all lowest-tier households are well above the Department's 2% burden target for each fuel (represented by the dashed line). To meet the DPU's affordability goal, National Grid's discount rates for electricity and gas would need to be set significantly higher than they currently are.
+
+::: column-margin
+| Household Size | Income Limit |
+|----------------|--------------|
+| 2 | $20,440 |
+| 3 | $25,820 |
+| 4 | $31,200 |
+| 5 | $36,580 |
+
+: Lowest Tier Income Limits. Source - [Fiscal Year 2025 ("HEAP") Income Eligibility and Benefit Levels](https://www.mass.gov/doc/fy-2025-heap-income-eligibility-benefit-chart-may-8-2025/download) {#tbl-lowest-tier-limits}
+
+:::
+
+
+We also observe a wide range of energy burdens among lowest-tier customers. Most households pay between 5% and 15% of their annual income on electricity and an additional 2% to 12% on gas—though a long tail of customers face even higher burdens. 
+
+This variety in energy burdens drives the trade-off at the heart of the TDR program's design: getting all lowest-tier customers under the target energy burden, not just the "average" customer, will require higher discount rates that push up the program's total cost.
+
+### How many of LMI households are already under 2%, with today's discount rates?
+
+Given the challenge of meeting the DPU's target energy burden, how many of the lowest-tier customers are already under it?
+
+:::{.column-page-inset-right}
+{{< embed notebooks/analysis.qmd#fig-dist-energy-burdens-current-by-tier >}}
+:::
+
+National Grid's discount rate for electric customers is currently `r scales::percent(current_discount_rate_elec, accuracy = 1)`. 
+
+Under this rate, we estimate that only **`r elec_burden_now`** of participating households in the lowest income tier spend less than `r scales::percent(default_target_burden, accuracy = 1)` of their annual income on electricity.  Across all HEAP tiers, we estimate that `r elec_burden_now_all_lmi` of participating LMI households are currently under the target burden.
+
+For gas customers, National Grid's current discount rate is `r scales::percent(current_discount_rate_gas, accuracy = 1)`. Under this rate, only **`r gas_burden_now`** of lowest-tier households spend less than `r scales::percent(default_target_burden, accuracy = 1)` of their annual income on gas, and `r gas_burden_now_all_lmi` of all LMI customers. 
+
+For both electricity and gas, an LMI customer's likelihood of being under the target burden rises with their income level. Gas customers in the middle and highest tiers are two to three times more likely to be under the 2% burden target than electric customers in the same tiers.
+
+### What discount rate achieves the target burden for the lowest tier?
+
+By applying the DPU's TDR proposal to a statistically representative sample of homes in National Grid's service territory and their simulated energy consumption,[^how] it becomes possible to see the relationship between the lowest tier's discount rate and the percentage of households that would fall under the target burden. 
+
+[^how]: See [appendix](#sec-data-and-methods) for technical details on the dataset we used.
+
+As expected, as the discount rate increases, more lowest-tier electric and gas customers fall under the target burden (@fig-discount-rate-vs-percentile-below-target). 
+
+:::{.column-page-inset-right}
+{{< embed notebooks/analysis.qmd#fig-discount-rate-vs-percentile-below-target >}}
+:::
+
+@fig-discount-rate-vs-percentile-below-target illustrates the challenge of getting the lowest-tier customers under the target burden: at a 70% discount rate, only 10% of National Grid's electric customers fall under the 2% target. 
+
+We observe increasing marginal returns after 80%, where every 5% increase in the rate brings 20% or more of the lowest-tier population under the target burden. 
+
+There is a clear **threshold effect** at play: once discount rates reach about 75%, they become much more effective at getting households under the target burden. Below that threshold, even substantial increases in discount rates don't help many households meet the target.
+
+For gas customers, there is less of a clear threshold effect. The gains are more gradual, and lower discount rates have more of an impact.
+
+However, it ends up being just as challenging to get the larger majority of customers under the 2% target: in order for 95% of the lowest tier to be under it, the discount rate would need to be `r rate_95_pct_below_elec` for electric customers and `r rate_95_pct_below_gas` for gas customers. 
+
+The inflection point we observe at 75% may give the impression that the discount rate is ineffective at improving energy affordability for National Grid's customers below that level, but as @fig-discount-rate-vs-area-lowest-tier reveals, this is not the case:
+
+:::{.column-page-inset-right}
+{{< embed notebooks/analysis.qmd#fig-discount-rate-vs-area-lowest-tier >}}
+:::
+
+In fact, a 63% discount rate would get half of lowest tier electric customers to pay less than 6% of their income on electricity, and 82% of gas customers to pay less than 2% on gas, a significant improvement on the status quo depicted in @fig-dist-energy-burdens-current. 
+
+### What is the impact of the proposed design on the middle tier?
+
+The preceding section only showed results for National Grid's lowest-tier customers. 
+
+However, as the discount rate for the lowest tier rises, the rate for the middle tier would rise as well, because the DPU's proposal defines the middle tier rate as an average of the lowest and highest tier rates—the latter of which would remain the same.
+
+@fig-discount-rate-vs-percentile-below-target-middle-and-lowest-tier-elec and @fig-discount-rate-vs-percentile-below-target-middle-and-lowest-tier-gas capture the relationship between the discount rate for the _lowest_ tier and the percentage of the _middle_ tier that would end up under the target burden. 
+ 
+:::{.column-page-inset-right}
+{{< embed notebooks/analysis.qmd#fig-discount-rate-vs-percentile-below-target-middle-and-lowest-tier-elec >}}
+:::
+
+:::{.column-page-inset-right}
+{{< embed notebooks/analysis.qmd#fig-discount-rate-vs-percentile-below-target-middle-and-lowest-tier-gas >}}
+:::
+
+The DPU has not announced a target burden for middle tier households. As designed, however, the middle tier discount would be unable to get the large majority of households under a 2% target burden—at any discount rate.
+
+At `r percent(max_discount_rate, accuracy = 1)`, the highest discount rate we modeled for the lowest tier, the middle tier would receive maximum discount rate of `r max_discount_rate_middle_tier_elec` for electric customers and `r max_discount_rate_middle_tier_gas` for gas customers. 
+
+This would put approximately `r pct_middle_below_max_elec` of electric customers and `r pct_middle_below_max_gas` of gas customers in the middle tier under a `r percent(default_target_burden, accuracy = 1)` burden. 
+
+This is a consequence of setting the middle tier discount rate to be an average of the lowest and highest tier rates. The DPU could consider redesigning the middle tier discount to be more generous (and defined independently from the lowest tier) or differentiating discounts for the different HEAP tiers that make up the middle tier. If the current discount rate design is selected, the DPU may have to accept a higher target burden for middle tier customers.
+
+If the energy burden target is relaxed to 4% or 6%, for instance, the results for the middle tier are more favorable (@fig-discount-rate-vs-area-middle-tier):
+
+:::{.column-page-inset-right}
+{{< embed notebooks/analysis.qmd#fig-discount-rate-vs-area-middle-tier >}}
+:::
+
+For instance, an 80% discount rate for the lowest tier would work out to a 56% electric and a 52% gas discount for the middle tier. Under these discounts, 65% of electric and 80% of gas National Grid customers in the middle tier would end up paying less than 4% of their income on their respective fuel.[^caveat]
+
+[^caveat]: Note that any given household's _total_ energy burden would be the sum of its separate electricity and gas burdens. For instance, a customer with a 4% energy burden on electricity and a 2% burden on gas would have a total burden of 6%.
+
+### What is the impact of the proposed design on non-LMI households? {#sec-tradeoffs}
+
+While the preceding sections seek to offer a more complete picture of the TDR program’s potential  _benefits_ , this section addresses the program's _costs_.
+
+By increasing the discounts offered to the lowest and middle tiers, the TDR program would cost more than today's flat discount program. 
+
+The DPU proposes to collect the additional revenue needed through a volumetric charge on non-LMI households. How big of a financial impact would this have on non-LMI households?
+
+@fig-percent-increase-program-cost-vs-percentile-below-target visualizes the relationship between the discount rate for National Grid's lowest tier and the total incremental program cost (for delivering additional discounts to the lowest _and_ middle tiers).
+
+:::{.column-page-inset-right}
+{{< embed notebooks/analysis.qmd#fig-percent-increase-program-cost-vs-percentile-below-target >}}
+:::
+
+@fig-percent-increase-program-cost-vs-percentile-below-target allows us to visualize the full spectrum of this **trade-off** associated with setting the lowest tier discount rate.
+
+For instance, a 60% electric discount rate for the lowest tier would increase program costs by `r pct_inc_60_elec`, resulting in only `r rate_60_pct_below_elec` of National Grid's lowest tier electric customers under the 2% target burden. 
+
+A 98% discount rate would result in nearly all lowest-tier customers under the burden target, at the price of doubling the program cost. Achieving the same result with gas customers would require that program to grow by 128%.
+
+While that may seem like a high cost, it's important to point out that this cost would spread out across the energy consumption of all non-LMI households.
+
+:::{.column-page-right} 
+::: {#fig-bars fig-cap="Distribution of National Grid households by HEAP tier within each fuel type. Customer counts were pulled from the DPU's model assumptions."}
+
+![](./img/fig-target-pcts-bar-chart-revised.png){fig-cap="Distribution of National Grid households by HEAP tier within each fuel type. Customer counts were pulled from the DPU's model assumptions."}
+:::
+:::
+
+The lowest and middle tiers make up 6% of National Grid's customer base, and any increased costs resulting from offering more generous discounts to these tiers would be spread across the 91% of National Grid's customers that are not LMI.[^countsnote]
+
+[^countsnote]: These figures come from the the [assumptions](https://docs.google.com/spreadsheets/d/1UCdkC6iVX1HepkySUm93S1h4VYK7-5rV/edit?gid=1839596448#gid=1839596448) tab in DPU's TDR Model (DPU 2025a).
+
+To contextualize the cost of the program, we estimate the average annual cost of the program to non-LMI households:  
+
+:::{.column-page-inset-right}
+{{< embed notebooks/analysis.qmd#fig-avg-non-LMI-increase-below-target >}}
+:::
+
+To achieve a discount rate where 95% of the lowest tier homes are below the target energy burden, the average non-LMI household would see an increase in their annual electric bill of **`r avg_annual_cost_95_below[['Electricity']]`** per year, or an average of $7 per month.
+
+For gas customers, the average non-LMI household would see an increase in their annual gas bill of **`r avg_annual_cost_95_below[['Gas']]`** per year, or an average of $4 per month.
+
+:::{.callout-note}
+The median gas usage of Massachusetts households in ResStock, the dataset our analysis relies on, is lower than that reported by gas utilities to the DPU. In particular, ResStock appears to systematically underestimate summer gas usage statewide. 
+
+Consequently, we may be underestimating the potential cost of National Grid's Tiered Discount Rate program for gas customers. While we believe our results to be directionally correct, they should be considered illustrative of the proposed methodology rather than final numbers. Further investigation into accurate load curves is needed to produce dependable cost estimates of the gas program.
+:::
+
+# Appendix 
+
+## Acknowledgments
+
+The author would like to thank Jolette Westbrook from the Environmental Defense Fund for her thoughtful feedback on this analysis.
+
+## Data and Methods
+
+### Overview
+
+This analysis uses a combination of utility rate data, building energy consumption data, and household income information to model the impact of different discount rates on energy affordability in National Grid's service territory. 
+
+To keep our results comparable to the DPU's TDR model, we use the same tariffs and assumptions for the relative number of customers across income tiers.
+
+1. First, we take energy consumption profiles from NREL's ResStock, as described in [Energy Usage Data](#sec-energy-usage-data). ResStock provides appliance-level energy consumption load curves for a representative sample of Massachusetts homes at 15-minute resolution, which we aggregate to monthly totals per fuel type.
+2. Next, we assign each virtual home an electric utility and, if applicable, a gas utility, a process described in the [Utility Assignment](#sec-utility-assign) section. This step allows us to associate each home with the appropriate electric and gas supply and delivery rates.
+3. To calculate energy burden metrics, we assign to each home a precise income within the income bracket information for each home provided by ResStock, a process described in the [Income Assignment](#sec-income-assignment) section. 
+4. We calculate the annual energy bill for each home by multiplying the monthly consumption by the [rate per kWh](#sec-tariff-structure), and adding the customer charge. 
+5. We apply different discount rates to LMI households and recalculate their energy burdens to see how many households in the lowest HEAP tier would fall below target burden thresholds (2% of income per fuel type), as shown in @fig-discount-rate-vs-percentile-below-target. For details see the [Energy Burden Calculation](#sec-energy-burden-calculation) section.
+6. We calculate the total program cost for a range of lowest tier discount rates, as shown in @fig-percent-increase-program-cost-vs-percentile-below-target, by summing the discounted amounts across all LMI households. 
+7. We then distribute these costs across non-LMI households based on their energy consumption to estimate the cost of the program per kWh, as described in the [Cost-Benefit Analysis](#sec-cost-benefit-analysis) section.
+8. Finally, we multiply the per kWh cost by the average annual energy consumption of non-LMI households to estimate the total annual household cost of the program. This allows us to show the trade-offs between achieving energy affordability goals and the costs borne by other customers, as shown in @sec-tradeoffs.
+
+
+### Household Income Assignment {#sec-income-assignment}
+ResStock provides income brackets for each virtual home in the data (in 2018 dollars), but not precise income figures, which are required to calculate each home's energy burden. 
+
+To assign specific annual incomes to each home, we use income distribution data from the US Census Bureau's Public Use Microdata Sample (PUMS) database.[^pums] For each home in our sample, we randomly draw an income value from the PUMS data that falls within that home's ResStock-assigned income bracket. 
+
+Finally, we inflate all income values to 2024 dollars and assign the appropriate HEAP tier (see [Income and HEAP Tier Classification](#sec-income-and-heap-tier-classification)).
+
+[^pums]: See [@censusbureau_AmericanCommunitySurvey_2022].
+
+### Home Utility Assignment {#sec-utility-assign}
+We assign utilities to each home based on its geographic location. ResStock provides state, county, and [PUMA](https://www.census.gov/programs-surveys/geography/guidance/geo-areas/pumas.html) (Public Use Microdata Area) information for each home, with PUMAs typically being smaller than counties. 
+
+For electric utilities, we assign all homes in a PUMA to the utility that serves that area. In cases where a PUMA overlaps multiple electric utility service territories, we divide the homes proportionally based on each utility's share of the PUMA's geographic area. 
+
+Gas utility assignment follows a similar process, with two key differences. First, some geographic areas are not served by the natural gas distribution network at all, so homes in these PUMAs are not assigned a gas utility. Second, homes that show no gas heating loads in the ResStock data are also not assigned a gas utility, regardless of their location.
+
+
+### Energy Burden Calculation
+For each household in the lowest HEAP tier, we calculated the annual energy burden by dividing the total annual energy bill by assigned household income. This gives us the percentage of income spent on energy. We then applied different discount rates to LMI households and recalculated their energy burdens to see how many households would fall below target burden thresholds (2% of income per fuel type).
+
+### Survey Weighting {#sec-survey-weighting}
+To ensure our analysis and total program cost calculations reflects the actual distribution of households across income tiers in Massachusetts, we applied survey weights that match reported HEAP participation rates.[^heaprates] This ensures that our cost estimates accurately reflect the true population proportions rather than the proportions in our simulation sample.
+
+[^heaprates]: See the [Assumptions](https://docs.google.com/spreadsheets/d/1UCdkC6iVX1HepkySUm93S1h4VYK7-5rV/edit?gid=1839596448#gid=1839596448) tab in DPU's TDR Model [@dpu_Docket2415TDR_2025].
+
+
+### Cost-Benefit Analysis
+We calculated the total program cost for different discount rate scenarios by summing the discounted amounts across all LMI households and weighting them by the appropriate [survey weights](#sec-survey-weighting) to reflect the actual distribution of households across HEAP tiers in Massachusetts. We then distributed these costs across non-LMI households based on their energy consumption to estimate the average bill increase for ratepayers. This allows us to show the trade-offs between achieving energy affordability goals and the costs borne by other customers.
+
+
+### Energy Usage Data {#sec-energy-usage-data}
+We used the ResStock building energy model, developed by the National Renewable Energy Laboratory, which simulates energy consumption for representative Massachusetts homes. This model accounts for variations in building characteristics (age, size, HVAC systems, insulation levels, etc.), weather patterns, and occupant behavior. For each home, we have monthly electricity and gas consumption data that reflects typical usage patterns throughout the year. We used ResStock EULP 2022.1.1 release.[^eulp] 
+
+[^eulp]: See [@nrel_EndUseLoadProfiles_2022].
+
+### Household Income and HEAP Tier Classification {#sec-income-and-heap-tier-classification}
+We matched each simulated home to household income data and classified them into HEAP (Home Energy Assistance Program) tiers based on federal poverty guidelines.[^fplguidelines]
+
+[^fplguidelines]: See the [FPL Limits](https://docs.google.com/spreadsheets/d/1UCdkC6iVX1HepkySUm93S1h4VYK7-5rV/edit?gid=1020366958#gid=1020366958) tab in DPU's TDR Model [@dpu_Docket2415TDR_2025].
+
+The lowest tier includes households below 100% of the federal poverty level, middle tiers include households between 100-200% of poverty level, and the highest tier includes households between 200% of poverty level and 60% of state median income. Non-LMI households are those above 60% of state median income. 
+
+The income thresholds for each tier vary by number of people in the household.
+
+| Income Level | HEAP Tier | Discount Rate |
+|--------------|-----------|---------------|
+| Less than 100% FPL | Lowest tier | Target burden 4% |
+| 100%-200% FPL | Middle tier | Average of lowest and highest tier |
+| 200% FPL to 60% SMI | Highest tier | Current discount rate |
+| Greater than 60% SMI | Non-LMI | No discount |
+
+### Tariff Structure {#sec-tariff-structure}
+We used the rate data presented by the Department of Public Utilities (DPU) for National Grid electric[^electricrate] and gas[^gasrate] rates. The electricity rates include a monthly customer charge and a per-kilowatt-hour (kWh) rate that varies by season. Gas rates include a monthly customer charge and a per-therm rate, which we converted to per-kWh rates using standard conversion factors. These rates form the baseline for calculating household energy bills before any discounts are applied. 
+
+[^electricrate]: See the [NGrid Meco Electric](https://docs.google.com/spreadsheets/d/1UCdkC6iVX1HepkySUm93S1h4VYK7-5rV/edit?disco=AAABmygvVM8) tab in DPU's TDR Model [@dpu_Docket2415TDR_2025].
+
+[^gasrate]: See the [NGrid BG](https://docs.google.com/spreadsheets/d/1UCdkC6iVX1HepkySUm93S1h4VYK7-5rV/edit?gid=970839984#gid=970839984) and [NGrid CG](https://docs.google.com/spreadsheets/d/1UCdkC6iVX1HepkySUm93S1h4VYK7-5rV/edit?gid=215020961#gid=215020961) tabs in DPU's TDR Model [@dpu_Docket2415TDR_2025].
+
+#### Electricity Tariffs
+
+```{r}
+elec_tariff_table |>
+  gt() |>
+  tab_header(
+    title = "National Grid Electricity R-1 Tariffs"
+  ) |>
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) |>
+  tab_style(
+    style = cell_borders(
+      sides = c("top", "bottom"),
+      weight = px(2)
+    ),
+    locations = cells_body(
+      rows = c(1, nrow(elec_tariff_table))
+    )
+  ) 
+```
+
+#### Gas Tariffs
+
+```{r}
+gas_tariff_table |>
+  gt() |>
+  tab_header(
+    title = "National Grid Gas R-3 Tariffs"
+  ) |>
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) |>
+  tab_style(
+    style = cell_borders(
+      sides = c("top", "bottom"),
+      weight = px(2)
+    ),
+    locations = cells_body(
+      rows = c(1, nrow(gas_tariff_table))
+    )
+  ) |>
+  tab_footnote(
+    footnote = "The original tariff structure was provided for two subsidiaries of National Grid, we averaged across them to get a single R-3 rate tariff and converted from $/therm to $/kWh using a conversion factor of 1 Therm = 29.307 kWh.",
+    locations = cells_title(groups = "title")
+  )
+```
+
+### Discount Rate Calculation
+
+We modeled a range of discount rates for the lowest tier ranging from the current discount rate (`r scales::percent(current_discount_rate_elec, accuracy = 1)` for electric and `r scales::percent(current_discount_rate_gas, accuracy = 1)` for gas) to `r scales::percent(max_discount_rate, accuracy = 1)`. For each discount rate applied to the lowest tier, we calculated a new discount rate for the middle tier, which is the average of the lowest and highest tier discount rates. Discount rates for the highest tier remain constant at the current discount rate.
+
+
+## Assumptions
+
+- **Induced demand:** This analysis does not address potential induced demand effects that might result from reduced energy costs. We assume that energy use will not change as a result of the discount program.
+- **Combined energy burden:** This analysis does not address the combined energy burden (gas plus electric) of National Grid's LMI customers. We instead apply the DPU's goal of 2% electric burden and 2% gas burden for gas heated homes. 
+- **Non-heating gas customers:** We did not model program costs for non-heating gas customers, even though they are eligible to participate in the discount program.
+- **Discount program participation:** We use load curves from non-LMI households to represent R1 electric customers and R3 gas customers. In reality, there are households that are eligible to participate in the discount program but do not participate. Under this program, it is possible that low-income households that do not participate in the discount program will see their energy burden increase. We do not specifically consider the impact on this group in our analysis. 
+
+## References
+
+::: {#refs}
+:::

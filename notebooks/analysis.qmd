@@ -1,0 +1,1570 @@
+---
+title: TDR Model Analysis
+
+appendix-style: default
+citation-location: document
+citation:
+  container-title: Switchbox
+
+format:
+  html:
+    page-layout: full
+---
+
+# Overview
+This analysis explores the relationship between discount rates for low-income utility customers
+and energy bills for non-low-income customers for National Grid in Massachusetts. The goal is to understand:
+
+1. How many households can achieve a target energy burden (2%) at different discount rates.
+2. What the cost implications are for non-LMI customers who fund the discount program.
+3. How different discount rates affect both lowest and middle tier LMI customers.
+
+The analysis uses simulated residential building load profiles from the National Renewable Energy Laboratory's (NREL) ResStock project, combined with actual utility tariffs and customer counts from National Grid's DPU filing.
+
+::: {.callout-note .column-margin}
+This notebook assumes you've already read the [methodology section](../index.qmd#data-and-methods) of the research memo.
+
+Please read it before continuing.
+:::
+
+## About this model
+
+Switchbox's TDR model is implemented in the R programming language, using the [tidyverse](https://www.tidyverse.org/) suite of data science packages. To follow along with this analysis, you'll need a basic understanding of R.
+
+The code for this notebook (and therefore for our TDR model) is open-source, and available on GitHub [here](https://www.github.com/switchbox-data/tdr-model).
+
+
+## Caveats and Limitations
+This analysis is intended to serve as a demonstrative framework for understanding the impact of LMI discounts on the rate base for gas and electric customers. Additional development of the framework is recommended before using the model to assess a specific policy intervention.
+
+1. Due to sampling limitations, the analysis esitmates the energy burden for gas and electirc customers independently of each other. A more robust approach would be to model the impacts for all electric and gas utilities and assess the impact for customers who have different combinations of electric and gas utilities.
+
+2. This analysis failed to replicate the current RAAF value for gas customers under the current discount rate. In the process of diagnosing this we found that the median gas consumption in ResStock was lower than the median gas consumption in the DPU's assumptions tab, particularly in the summer. Further work is needed to generate a more accurate  results for gas customers.
+
+3. We reweighted the data to match the relative proportions of customers in each HEAP tier. Would recommend reweighting the data such that the total number of customers in each tier is the same as the total number of customers in the DPU's assumptions tab. This would allow the model to esitmate the total program cost rather tehn the marginal percent increase in program cost.
+
+4. The ResStock dataset does not include which utility is used for each building. See the report Appendex section Home Utility Assignment for more details on how we assigned utilities to the buildings in the dataset.
+
+5. We do not explicitly consider the impact on LMI customers who do not participate in the discount program. This should be addressed in future work.
+
+
+## How to run the analysis for a new utility
+
+1. Update the discount rate tables in the Google Sheets.
+2. Update the target percentages in the Google Sheets.
+3. Update the current_discount_rate_elec and current_discount_rate_gas in the analysis.qmd file.
+4. Update the electric_utility_name and gas_utility_name in the analysis.qmd file.
+      gas utilites available:"nationalgrid", "eversource","berkshire","unitil","liberty"
+      electric utilites available:"eversource", "nationalgrid", "unitil" 
+5. Run the analysis.
+
+# Setup
+## Import required libraries
+
+First, we import the libraries we'll use in this notebook.
+
+```{r}
+#| message: false
+#| warning: false
+#| output: false
+suppressPackageStartupMessages({
+  library(tidyverse)  # for data wrangling and plotting
+  library(DBI)        # for reading from our DuckDB database
+  library(duckdb)     # for reading from our DuckDB database
+  library(furrr)      # for parallel processing
+  library(patchwork)  # for combining plots
+  library(scales)     # for formatting numbers
+  library(ggrepel)    # for labeling points in plots
+  library(srvyr)      # for weighted analysis of survey data
+  library(gt)         # for creating formatted tables
+})
+```
+
+## Define analysis parameters
+
+Next, we define the top-level parameters used throughout the analysis, including the utility name, target burden, and maximum allowable discount rate.
+
+```{r}
+# Set the utility name for the analysis. 
+#This would need to be updated to model a different utility.
+electric_utility_name <- "nationalgrid"
+gas_utility_name <- "nationalgrid"
+
+# Set default target burden to 2% of income for each fuel type.
+default_target_burden <- 0.02
+
+# Set the maximum allowable discount rate for our model.
+max_discount_rate <- 0.98
+```
+
+We also set National Grid's current discount rates for electricity and gas. These rates apply to all tiers.
+```{r}
+# These may need to be updated to model a different utility.
+current_discount_rate_elec <- 0.32
+current_discount_rate_gas <- 0.25
+```
+
+These currently apply to all tiers, but our model will allow for different discount rates for each tier. To prepare for this, let's create a table that stores the discount rate for each tier.
+
+```{r}
+# Create discount rate tables for electricity and gas. 
+discount_rate_elec <- tibble(
+  tier = c("lowest tier", "middle tier", "highest tier", "not LMI"),
+  discount_rate = c(rep(current_discount_rate_elec, 3), 0)
+)
+
+discount_rate_gas <- tibble(
+  tier = c("lowest tier", "middle tier", "highest tier", "not LMI"),
+  discount_rate = c(rep(current_discount_rate_gas, 3), 0)
+)
+```
+```{r}
+# View the discount rate tables.
+discount_rate_elec |> gt() |>
+  tab_style( style = cell_text(weight = "bold"), locations = cells_column_labels()) |>
+  fmt_percent(columns = discount_rate, decimals = 0)
+
+discount_rate_gas |> gt() |>
+  tab_style( style = cell_text(weight = "bold"), locations = cells_column_labels()) |>
+  fmt_percent(columns = discount_rate, decimals = 0)
+```
+
+# Import data
+## Load tariff data 
+
+In this section, we import gas and electric tariffs. We pulled this data from the DPU's TDR model excel sheet (electric tariffs [here](https://docs.google.com/spreadsheets/d/1UCdkC6iVX1HepkySUm93S1h4VYK7-5rV/edit?disco=AAABmygvVM8), gas tariffs [here](https://docs.google.com/spreadsheets/d/1UCdkC6iVX1HepkySUm93S1h4VYK7-5rV/edit?gid=970839984#gid=970839984) and [here](https://docs.google.com/spreadsheets/d/1UCdkC6iVX1HepkySUm93S1h4VYK7-5rV/edit?gid=215020961#gid=215020961)), and collected it in [this Google Sheet](https://docs.google.com/spreadsheets/d/174wOCWTcCIHmQPfBUOXH0w-T2TEt4yh3g-edx7O-svw/edit?gid=2072967321#gid=2072967321).
+
+```{r}
+# Define the Google Sheet URL and the sheet names.
+url_google_sheets <- "https://docs.google.com/spreadsheets/d/174wOCWTcCIHmQPfBUOXH0w-T2TEt4yh3g-edx7O-svw/edit?gid=2072967321#gid=2072967321"
+inc_sheet <- "low_income_thresholds"
+elec_sheet <- "elec_tariff"
+gas_sheet <- "gas_tariff"
+
+# Deauthorize Google Sheets to avoid authentication errors.
+googlesheets4::gs4_deauth()
+
+# Read electricity tariff data from Google Sheets.
+elec_tariff <- googlesheets4::read_sheet(url_google_sheets, sheet = elec_sheet) |>
+  select(utility, customer_charge, volumetric_rate, month, current_discount)
+
+# Read gas tariff data from Google Sheets.
+gas_tariff <- googlesheets4::read_sheet(url_google_sheets, sheet = gas_sheet) |>
+  select(utility, customer_charge, volumetric_rate, month, current_discount)
+```
+
+Let's take a look at the electricity and gas tariff data.
+
+```{r}
+elec_tariff |> gt() |>
+  tab_style( style = cell_text(weight = "bold"), locations = cells_column_labels()) |>
+  fmt_currency(columns = c(customer_charge, volumetric_rate), decimals = 4) |>
+  fmt_percent(columns = current_discount, decimals = 0)
+
+gas_tariff |> gt() |>
+  tab_style( style = cell_text(weight = "bold"), locations = cells_column_labels()) |>
+  fmt_currency(columns = c(customer_charge, volumetric_rate), decimals = 4) |>
+  fmt_percent(columns = current_discount, decimals = 0)
+```
+
+The gas volumetric rates have been converted from $ per kWh, because the gas consumption data in the ResStock data is in kWh.
+
+## Load income thresholds 
+
+In this section, we load the income thresholds for that define each tier in the discount program. These are also stored in the Google Sheet.
+
+```{r}
+# Read the income thresholds from the Google Sheet.
+low_income_thresholds <- googlesheets4::read_sheet(url_google_sheets, sheet = inc_sheet)
+
+# View the income thresholds.
+low_income_thresholds |> gt() |>
+  tab_style( style = cell_text(weight = "bold"), locations = cells_column_labels()) |>
+  fmt_currency(columns = income_threshold_lower, decimals = 0) |>
+  fmt_currency(columns = income_threshold_upper, decimals = 0)
+```
+
+There are 6 tiers total. The annual income ranges associated with each tier are defined in terms of percentages of the Federal Poverty Level (FPL) for a given number of occupants.
+
+## Load ResStock housing units
+
+First, we define a function to read the ResStock data from our DuckDB database.
+
+```{r}
+read_from_duckdb <- function(path, table) {
+  if (is.null(path) || is.null(table)) {
+    stop("Database path or table name not configured")
+  }
+  con <- DBI::dbConnect(duckdb::duckdb(), path)
+  data <- DBI::dbReadTable(con, table)
+  on.exit(DBI::dbDisconnect(con))
+  return(data)
+}
+```
+
+Next, we read the ResStock data, excluding buildings with negative electricity consumption (we are not considering the role of solar in this analysis).
+
+```{r}
+# Define the path to the DuckDB database that contains the ResStock data.
+duckdb_path <- "/workspaces/reports/data/ResStock/2022_resstock_amy2018_release_1.1/rs_ma_hp_rates_2.db"
+
+# Identify buildings with negative electricity consumption.
+exclude_bldgs <- read_from_duckdb(duckdb_path, "ma_monthly") |>
+  filter(total_elec_kwh < 0) |>
+  pull(bldg_id)
+
+# Read housing unit metadata from ResStock 2022 v1.1.
+bldgs_raw <- read_from_duckdb(duckdb_path, "housing_units") |>
+  filter(!bldg_id %in% exclude_bldgs) |>  # Remove buildings with negative electricity consumption
+  select(bldg_id, assigned_income, electric_utility, gas_utility, baseline_heating_type, in.occupants) 
+```
+
+Each row in this table represents a housing unit. It could be a single-family home, or an apartment in a multi-family building. The ResStock data contains the following columns:
+
+| Column | Description |
+|--------|-------------|
+| `bldg_id` | Unique identifier for each housing unit |
+| `assigned_income` | Annual household income (2024 dollars) |
+| `electric_utility` | Electric utility serving this location |
+| `gas_utility` | Gas utility serving this location (if any) |
+| `baseline_heating_type` | Primary heating fuel (Natural Gas, Electric, etc.) |
+| `in.occupants` | Number of people in the household |
+
+ResStock provides each unit's occupants and primary heating fuel. We've already applied steps [2 and 3 in the methodology](../index.qmd#overview) at this point, and stored the results in our database, so we also know the annual income, electric, and gas utility (if any) of every ResStock housing unit in MA.
+
+
+## Assign each housing unit to a HEAP tier
+
+We now need to match each housing unit to the correct HEAP tier, based on each household's annual income, and the tier's income thresholds for a given number of occupants.
+
+HEAP tiers are defined as:
+
+| HEAP Tier | Income Level |
+|-----------|--------------|
+| Lowest tier | Less than 100% FPL |
+| Middle tier | 100%-200% FPL |
+| Highest tier | 200% FPL to 60% SMI |
+| Non-LMI | Greater than 60% SMI |
+
+*FPL = federal poverty level, SMI = state median income.*
+
+```{r}
+bldgs <- bldgs_raw |>
+  left_join(
+    low_income_thresholds,
+    join_by(
+      assigned_income >= income_threshold_lower,
+      assigned_income < income_threshold_upper,
+      in.occupants == occupants_min  # Match hh to threshold for correct number of occupants.
+    )
+  ) |>
+  mutate(heap_tier = case_when(is.na(note) ~ "not LMI",
+    note == "100% FPL" ~ "lowest tier",
+    note == "60% statewide" ~ "highest tier",
+    .default = "middle tier"
+  ))
+```
+
+We've now resolved each dwelling's HEAP tier:
+
+```{r}
+bldgs |> 
+  select(bldg_id, assigned_income, in.occupants, heap_tier) |>
+  head(15) |> gt() |>
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels()) |>
+  fmt_currency(columns = assigned_income, decimals = 0)
+```
+
+
+## Create utility-specific datasets
+
+First, let's find all of National Grid's electric customers.
+
+```{r}
+bldgs_elec <- bldgs |>
+  filter(electric_utility == electric_utility_name)
+
+```
+
+Next, let's find all of National Grid's gas customers. We'll also filter to only include customers who use natural gas for heating.
+
+```{r}
+bldgs_gas <- bldgs |>
+  filter(
+    baseline_heating_type == "Natural Gas", #select only customers who use natural gas for heating.
+    gas_utility == gas_utility_name
+  )
+```
+
+Let's run a quick sanity check, ensuring that each housing unit only appears in one row of each of these datasets.
+
+```{r}
+# assert that we only have one row per bldg_id
+stopifnot(dim(bldgs_elec)[1] == length(unique(bldgs_elec$bldg_id)))
+stopifnot(dim(bldgs_gas)[1] == length(unique(bldgs_gas$bldg_id)))
+
+```
+
+## Survey Weight Creation
+
+ResStock's housing units are sampled from a statistical representation of the US building stock. Without adjustment, the ResStock sample doesn't perfectly match National Grid's actual customer distribution across HEAP tiers. 
+
+To correct this, we:
+
+1. Load target percentages from DPU filing
+2. Calculate weights to match those targets
+3. Apply the weights to energy consumption data
+4. Verify the weights produce correct proportions
+
+Using the customer counts from the DPU's assumptions tab, and the percent distribution of customers in each tier, we can calculate the target percentages for each HEAP tier. These target percentages are stored in the Google Sheets and would need to be updated to model a different utility.
+
+### Load target percentages
+
+```{r}
+target_pcts_elec <- googlesheets4::read_sheet(url_google_sheets,
+  sheet = "target_heap_pct_elec", range = "A:C"
+) 
+
+target_pcts_gas <- googlesheets4::read_sheet(url_google_sheets,
+  sheet = "target_heap_pct_gas", range = "A:C"
+)
+
+target_pcts_elec |> gt() |>
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels()) |>
+  fmt_percent(columns = target_pct, decimals = 0)
+
+target_pcts_gas |> gt() |>
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels()) |>
+  fmt_percent(columns = target_pct, decimals = 0)
+```
+
+These target percentages are stored in the Google Sheets and would need to be updated to model a different utility.
+
+### Calculate survey weights
+
+```{r}
+# Function to create survey weights that match target percentages
+create_survey_weights <- function(bldgs, target_pcts) {
+  # Calculate weights that will adjust our sample to match target percentages
+  # while preserving relative relationships within each tier
+  current_pcts <- bldgs |>
+    group_by(heap_tier) |>
+    summarize(n = n()) |>
+    mutate(current_pct = n / sum(n))
+  
+  weight_adjustments <- current_pcts |>
+    left_join(select(target_pcts, heap_tier, target_pct), by = "heap_tier") |>
+    mutate(
+      weight_factor = target_pct / current_pct,
+      # Normalize weights so they create the correct proportions
+      # The sum of (weight * n) should equal the total sample size
+      # So we normalize by: weight_factor / sum(weight_factor * current_pct)
+      normalized_weight = weight_factor / sum(weight_factor * current_pct)
+    ) |>
+    # Ensure all values are numeric and handle any NA values
+    mutate(
+      weight_factor = as.numeric(weight_factor),
+      normalized_weight = as.numeric(normalized_weight),
+      normalized_weight = if_else(is.na(normalized_weight), 1, normalized_weight)
+    )
+  
+  # Apply weights to the original data
+  bldgs_weighted <- bldgs |>
+    left_join(weight_adjustments |> select(heap_tier, normalized_weight), by = "heap_tier") |>
+    mutate(
+      survey_weight = if_else(is.na(normalized_weight), 1, normalized_weight)
+    )
+  
+  return(bldgs_weighted)
+}
+
+# Apply weights to main building datasets
+bldgs_elec_weighted <- create_survey_weights(bldgs_elec, target_pcts_elec)
+bldgs_gas_weighted <- create_survey_weights(bldgs_gas, target_pcts_gas)
+```
+
+### Load monthly consumption data
+
+Join with weighted building data to create final analysis datasets
+
+```{r}
+# Load monthly consumption data  by fuel type for all buildings in our dataset
+monthly_use <- read_from_duckdb(duckdb_path, "ma_monthly") |>
+  filter(upgrade == "0") |>
+  select(bldg_id, month, total_elec_kwh, total_gas_kwh)
+```
+
+### Apply weights to monthly consumption data
+
+```{r}
+# Create weighted monthly usage datasets
+monthly_use_all_elec_weighted <- monthly_use |>
+  right_join(bldgs_elec_weighted, by = "bldg_id") |>
+  select(bldg_id, assigned_income, heap_tier, month, consumption = total_elec_kwh, survey_weight)
+
+# Note gas consumption is in kwh
+monthly_use_all_gas_weighted <- monthly_use |>
+  right_join(bldgs_gas_weighted, by = "bldg_id") |>
+  select(bldg_id, assigned_income, heap_tier, month, consumption = total_gas_kwh, survey_weight)
+```
+
+### Verify weights produce target percentages
+
+```{r}
+# Verify weights produce target percentages
+print("Electric - Weighted vs Target Percentages")
+elec_weighted_summary <- monthly_use_all_elec_weighted |>
+  group_by(heap_tier) |>
+  summarize(
+    n_weighted = sum(survey_weight)
+  ) |>
+  mutate(
+    pct_weighted = n_weighted / sum(n_weighted)
+  ) |>
+  left_join(target_pcts_elec |> select(heap_tier, target_pct), by = "heap_tier") |>
+  mutate(difference = pct_weighted - target_pct)
+
+print(elec_weighted_summary)
+
+print("Gas - Weighted vs Target Percentages")
+gas_weighted_summary <- monthly_use_all_gas_weighted |>
+  group_by(heap_tier) |>
+  summarize(
+    n_weighted = sum(survey_weight)
+  ) |>
+  mutate(
+    pct_weighted = n_weighted / sum(n_weighted)
+  ) |>
+  left_join(target_pcts_gas |> select(heap_tier, target_pct), by = "heap_tier") |>
+  mutate(difference = pct_weighted - target_pct)
+
+print(gas_weighted_summary)
+
+```
+
+# Core Analysis Functions
+These functions form the analytical backbone, calculating:
+
+1. Monthly bills before and after discounts
+2. Program costs (both total and marginal increases)
+3. Energy burdens at household level
+4. Impact on non-LMI customers
+
+```{r}
+calc_monthly_energy_bills_LMI <- function(monthly_use_LMI, tariff) {
+  # Calculate unweighted monthly bills for LMI households:
+  # - bill: Total undiscounted bill for the month
+  # - bill_current_discount: Bill with current discount rate applied
+  # Bills are unweighted because we want raw energy burdens
+  # Program costs are weighted later to reflect actual customer counts
+  monthly_bills_LMI <- monthly_use_LMI |>
+    left_join(tariff, join_by(month == month)) |>
+    mutate(
+      bill = pmax((customer_charge + volumetric_rate * consumption), 0),
+      bill_current_discount = case_when(heap_tier == "not LMI" ~ bill,
+        .default = bill * (1 - current_discount)
+      )
+    )
+
+  return(monthly_bills_LMI)
+}
+
+apply_LMI_discounts <- function(monthly_bills_LMI, discount_rate_tbl) {
+  # Apply tier-specific discount rates to monthly bills
+  # The discount_rate_tbl specifies different rates for:
+  # - Lowest tier (direct input)
+  # - Middle tier (average of lowest and highest tier rates - this will be automatically calculated) 
+  # - Highest tier (fixed at current rate)
+  # - Non-LMI (no discount)
+  monthly_discounted_bills_LMI <- monthly_bills_LMI |>
+    left_join(discount_rate_tbl, join_by(heap_tier == tier)) |>
+    mutate(
+      bill_discounted = bill * (1 - discount_rate)
+    )
+
+  return(monthly_discounted_bills_LMI)
+}
+
+calc_discount_program_cost <- function(monthly_discounted_bills_LMI) {
+  # Calculate total program cost using survey weights
+  # This must be weighted so we can divide by weighted total kwh 
+  # of non-LMI households to get appropriately weighted cost per kwh
+  discount_program_cost <- monthly_discounted_bills_LMI |>
+    summarise(
+      discount_program_cost = sum((bill - bill_discounted) * survey_weight)
+    ) |>
+    pull(discount_program_cost)
+
+  return(discount_program_cost) # weighted program cost
+}
+
+calc_discount_program_cost_marginal <- function(monthly_discounted_bills_LMI) {
+  # Calculate the marginal increase in program cost compared to current discount levels
+  # This helps understand the incremental cost of increasing discount rates
+  discount_program_cost_marginal <- monthly_discounted_bills_LMI |>
+    summarise(
+      discount_program_cost_marginal = sum((bill_current_discount - bill_discounted) * survey_weight)
+    ) |>
+    pull(discount_program_cost_marginal)
+
+  return(discount_program_cost_marginal)
+}
+
+calc_energy_burdens <- function(monthly_discounted_bills_LMI) {
+  # Calculate annual energy burden (total bills / income) for each household
+  # Note: Energy burdens are calculated using unweighted bills because
+  # we want to show actual household-level impacts
+  annual_energy_burdens <- monthly_discounted_bills_LMI |>
+    summarise(
+      .by = c(bldg_id, heap_tier, assigned_income, survey_weight),
+      burden = sum(bill_discounted) / unique(assigned_income)
+    )
+
+  return(annual_energy_burdens)
+}
+
+percentile_in_tier_below_target <- function(annual_energy_burdens, target_burden, tier) {
+  # For a given HEAP tier, calculate what percentage of households
+  # achieve the target energy burden
+  # Filter to remove unrealistic burdens > 100%
+  percentile_below_target <- annual_energy_burdens |>
+    filter(heap_tier == tier) |>
+    filter(burden < 1) |>
+    summarise(
+      percentile_below_target = sum(burden < target_burden) / n()
+    ) |>
+    pull(percentile_below_target)
+
+  return(percentile_below_target)
+}
+
+avg_non_LMI_increase <- function(monthly_use_non_LMI, discount_program_cost) {
+  # Calculate average annual bill increase for non-LMI customers
+  # This represents how much each non-LMI customer pays to fund the program
+  total_kwh <- calc_total_kwh(monthly_use_non_LMI)  # weighted total kwh of non LMI households.
+  cost_per_kwh <- discount_program_cost / total_kwh # weighted total program cost divided by weighted total kwh.
+
+  avg_non_LMI_increase <- calc_annual_LMI_program_payment(monthly_use_non_LMI, cost_per_kwh) |>
+    summarise(
+      # Use simple average since program payments are already based on weighted totals
+      avg_non_LMI_increase = mean(program_payment)
+    ) |>
+    pull(avg_non_LMI_increase)
+
+  return(avg_non_LMI_increase)
+}
+
+calc_total_kwh <- function(monthly_use) {
+  # calculate the weighted total kwh of non LMI households.
+  total_kwh <- monthly_use |>
+    summarise(
+      total_kwh = sum(consumption * survey_weight)
+    ) |>
+    pull(total_kwh)
+  return(total_kwh)
+}
+
+calc_annual_LMI_program_payment <- function(monthly_use_non_LMI, cost_per_kwh) {
+  # we take the cost_per_kwh, which is the weighted total program cost divided by the weighted total kwh of non LMI households. We then multiply this by the unweighted annual consumption of each household to get the annual program payment.
+  hh_program_payment <- monthly_use_non_LMI |>
+    summarise(
+      .by = bldg_id,
+      # Calculate annual consumption per household (unweighted)
+      annual_consumption = sum(consumption),
+      program_payment = annual_consumption * cost_per_kwh
+    )
+
+  return(hh_program_payment)
+}
+
+make_discount_rate_table <- function(discount_rate_lowest, discount_rate_tbl) {
+  # This function creates a discount rate table that is used to apply the discount rates to the monthly bills. It will automatically calculate the middle tier discount rate as the average of the lowest and highest tier discount rates.
+  discount_rate_highest <- discount_rate_tbl |>
+    filter(tier == "highest tier") |>
+    pull(discount_rate)
+
+  updated_discount_rate_tbl <- discount_rate_tbl |>
+    mutate(
+      discount_rate = case_when(tier == "lowest tier" ~ discount_rate_lowest,
+        tier == "middle tier" ~ mean(c(discount_rate_lowest, discount_rate_highest)),
+        tier == "highest tier" ~ discount_rate_highest,
+        .default = 0
+      )
+    )
+
+  return(updated_discount_rate_tbl)
+}
+
+
+
+eval_discount_rate <- function(discount_rate_lowest, discount_rate_tbl, monthly_use_all, tariff, target_burden) {
+  monthly_use_non_LMI <- monthly_use_all |>
+    filter(heap_tier == "not LMI")
+
+  monthly_use_LMI <- monthly_use_all |>
+    filter(heap_tier != "not LMI")
+
+
+  discount_rate_tbl_updated <- make_discount_rate_table(discount_rate_lowest, discount_rate_tbl) # update the discount rate table with the lowest tier discount rate.
+  monthly_bills_LMI <- calc_monthly_energy_bills_LMI(monthly_use_LMI, tariff) # calculate the monthly bills for LMI households.
+  monthly_discounted_bills_LMI <- apply_LMI_discounts(monthly_bills_LMI, discount_rate_tbl_updated) # apply the discount rates to the monthly bills for LMI households.
+  discount_program_cost <- calc_discount_program_cost(monthly_discounted_bills_LMI) # weighted program cost
+  discount_program_cost_marginal <- calc_discount_program_cost_marginal(monthly_discounted_bills_LMI) # weighted marginal program cost
+  annual_energy_burdens <- calc_energy_burdens(monthly_discounted_bills_LMI) # calculate the annual energy burdens for LMI households.
+  percentile_below_target_lowest <- percentile_in_tier_below_target(annual_energy_burdens, target_burden, "lowest tier") # calculate the percentile of LMI households below the target burden.
+  avg_non_LMI_increase <- avg_non_LMI_increase(monthly_use_non_LMI, discount_program_cost) # calculate the average annual bill increase for non-LMI households.
+  avg_non_LMI_increase_marginal <- avg_non_LMI_increase(monthly_use_non_LMI, discount_program_cost_marginal) # calculate the average annual bill increase for non-LMI households.
+  cost_per_kwh <- discount_program_cost / calc_total_kwh(monthly_use_non_LMI) # cost per kwh for non-LMI households.
+  marginal_cost_per_kwh <- discount_program_cost_marginal / calc_total_kwh(monthly_use_non_LMI) # marginal cost per kwh for non-LMI households.
+  percent_increase_program_cost <- discount_program_cost_marginal / (discount_program_cost - discount_program_cost_marginal) # increase in program cost as a percent of the current program cost.
+  # Return as a list of values for each discount rate.
+  return(list(
+    percentile_below_target = percentile_below_target_lowest,
+    avg_non_LMI_increase = avg_non_LMI_increase,
+    avg_non_LMI_increase_marginal = avg_non_LMI_increase_marginal,
+    marginal_cost_per_kwh = marginal_cost_per_kwh,
+    cost_per_kwh = cost_per_kwh,
+    percent_increase_program_cost = percent_increase_program_cost,
+    discount_program_cost = discount_program_cost,
+    discount_program_cost_marginal = discount_program_cost_marginal,
+    annual_energy_burdens = setNames(list(annual_energy_burdens), as.character(discount_rate_lowest))
+  ))
+}
+
+# Set up the discount rate sequence for the electricity and gas curves. We chose to start at the current discount rate and go to the maximum discount rate in 1% increments.
+discount_rate_lowest_elec <- seq(current_discount_rate_elec, max_discount_rate, 0.01)
+discount_rate_lowest_gas <- seq(current_discount_rate_gas, max_discount_rate, 0.01)
+
+# This function is used to generate the curve for a given fuel type. It takes the discount rate 
+# sequence, the discount rate table, the monthly consumption data, the tariff data, and the target 
+# burden. It then evaluates the discount rate for each discount rate in the sequence and returns 
+# a tibble of results.
+generate_curve <- function(discount_rate_lowest, discount_rate_tbl, monthly_use_fuel_all, tariff, target_burden) {
+  # Set up parallel processing
+  plan(multisession)
+
+  # Map over discount rates and return tibble of results (parallel)
+  results_tibble <- future_map_dfr(
+    discount_rate_lowest,
+    function(rate) {
+      result <- eval_discount_rate(rate, discount_rate_tbl, monthly_use_fuel_all, tariff, target_burden)
+      tibble(
+        discount_rate_lowest = rate,
+        percentile_below_target = result$percentile_below_target,
+        avg_non_LMI_increase = result$avg_non_LMI_increase,
+        avg_non_LMI_increase_marginal = result$avg_non_LMI_increase_marginal,
+        marginal_cost_per_kwh = result$marginal_cost_per_kwh,
+        cost_per_kwh = result$cost_per_kwh,
+        percent_increase_program_cost = result$percent_increase_program_cost,
+        discount_program_cost = result$discount_program_cost,
+        discount_program_cost_marginal = result$discount_program_cost_marginal,
+        annual_energy_burdens = result$annual_energy_burdens
+      )
+    },
+    .id = NULL
+  )
+
+  return(results_tibble)
+}
+
+# Generate the curves for electricity and gas.
+results_elec <- generate_curve(discount_rate_lowest_elec, discount_rate_elec, monthly_use_all_elec_weighted, elec_tariff, default_target_burden) |>
+  mutate(fuel_type = "Electricity")
+
+results_gas <- generate_curve(discount_rate_lowest_gas, discount_rate_gas, monthly_use_all_gas_weighted, gas_tariff, default_target_burden) |>
+  mutate(fuel_type = "Gas")
+
+
+
+# Unnest the annual_energy_burdens lists
+annual_energy_burdens_elec <- results_elec |>
+  select(discount_rate_lowest, annual_energy_burdens) |>
+  unnest(annual_energy_burdens) |>
+  mutate(fuel_type = "Electricity") |>
+  filter(burden < 1)
+
+annual_energy_burdens_gas <- results_gas |>
+  select(discount_rate_lowest, annual_energy_burdens) |>
+  unnest(annual_energy_burdens) |>
+  mutate(fuel_type = "Gas") |>
+  filter(burden < 1)
+
+results_all <- bind_rows(results_elec, results_gas) |>
+  select(-annual_energy_burdens) |>
+  mutate(discount_plt_lab = case_when(discount_rate_lowest == current_discount_rate_elec & fuel_type == "Electricity" ~ paste0(scales::percent(discount_rate_lowest, accuracy = 1), " discount\n(current)"),
+    discount_rate_lowest == current_discount_rate_gas & fuel_type == "Gas" ~ paste0(scales::percent(discount_rate_lowest, accuracy = 1), " discount\n(current)"),
+    .default = paste0(scales::percent(discount_rate_lowest, accuracy = 1), " discount")
+  ))
+
+
+
+```
+
+```{r}
+#formatting for plots
+source("/workspaces/reports/lib/ggplot/switchbox_theme.R")
+
+fuel_colors <- c("Electricity" = sb_colors[["midnight"]], "Gas" = sb_colors[["carrot"]])
+heap_tier_colors <- c("lowest tier" = sb_colors[["sky"]], "middle tier" = sb_colors[["pistachio"]], "highest tier" = sb_colors[["carrot"]])
+```
+
+## Visualization Section
+The following plots create figures for the report that tell our story:
+
+### Figure 1: Current State Analysis
+Shows distribution of energy burdens under current discount rates
+Key findings:
+  - Wide spread in energy burdens even with current discounts
+  - Many households well above target 2% burden
+  - Gas burdens generally higher than electric
+
+```{r}
+#| label: fig-dist-energy-burdens-current
+#| fig-cap: "Distribution of energy burdens for lowest-income HEAP tier households at the current discount rate. Energy burdens are capped at 50% to make the distribution more visible."
+#| fig-width: 7
+#| fig-height: 5
+#| fig-cap-location: margin
+
+annual_energy_burdens_elec |>
+  filter(heap_tier == "lowest tier", discount_rate_lowest == current_discount_rate_elec) |>
+  bind_rows(annual_energy_burdens_gas |>
+    filter(heap_tier == "lowest tier", discount_rate_lowest == current_discount_rate_gas)) |>
+  filter(burden < 0.5) |>
+  ggplot(aes(x = burden, fill = fuel_type)) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1), ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+  labs(x = "Energy burden", y = "Proportion") +
+  scale_fill_manual(values = fuel_colors) +
+  facet_wrap(~fuel_type) +
+  geom_histogram(aes(y = ..count.. / sum(..count..))) +
+  geom_vline(xintercept = default_target_burden, linetype = "dashed", color = sb_colors[["pistachio_text"]])+
+  theme(legend.position = "none")
+
+```
+
+### Figure 2: HEAP Tier Analysis
+Compares achievement of target burden across tiers
+Demonstrates:
+  - Current program effectiveness varies by tier
+```{r}
+#| label: fig-dist-energy-burdens-current-by-tier
+#| fig-cap: "Percent of households below the 2% target energy burden at the current discount rate by HEAP tier"
+#| fig-width: 7
+#| fig-height: 5
+#| fig-cap-location: margin
+annual_energy_burdens_elec |>
+  filter(heap_tier != "not LMI", discount_rate_lowest == current_discount_rate_elec) |>
+  bind_rows(annual_energy_burdens_gas |>
+    filter(heap_tier != "not LMI", discount_rate_lowest == current_discount_rate_gas)) |>
+  filter(burden < 1) |>
+  summarise(
+    .by = c(fuel_type, heap_tier),
+    below_target = sum(burden < default_target_burden) / n()
+  ) |>
+  ggplot(aes(x = fct_relevel(heap_tier, "lowest tier", "middle tier"), y = below_target, fill = fuel_type)) +
+geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = scales::percent(below_target, accuracy = 0.1)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, 
+            size = 3) +
+  labs(x = "HEAP tier", y = "Percent below target energy burden") +
+  facet_wrap(~fuel_type)+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 0.1))+
+  scale_fill_manual(values = fuel_colors)+
+  theme(legend.position = "none")
+```
+
+### Figure 3: Impact of Increasing Discounts
+Shows how different discount rates affect:
+  - Lowest tier households
+  - Middle tier households (who get intermediate discount)
+Key findings discussed in report section "Discount Rate Analysis"
+```{r}
+x_breaks_elec <- seq(0.3, 1, 0.1)
+x_breaks_gas <- seq(0.2, 1, 0.1)
+# custom_x_labs_elec <- paste0(scales::percent((x_breaks_elec + current_discount_rate_elec) / 2, accuracy = 1), "\n(", scales::percent(x_breaks_elec, accuracy = 1), ")")
+# custom_x_labs_gas <- paste0(scales::percent((x_breaks_gas), accuracy = 1), "\n(", scales::percent(x_breaks_gas * 2 - current_discount_rate_gas, accuracy = 1), ")")
+custom_x_labs_elec <- paste0(scales::percent((x_breaks_elec), accuracy = 1), "\n(", scales::percent((x_breaks_elec + current_discount_rate_elec) / 2, accuracy = 1), ")")
+custom_x_labs_gas <- paste0(scales::percent((x_breaks_gas), accuracy = 1), "\n(", scales::percent((x_breaks_gas + current_discount_rate_gas) / 2, accuracy = 1), ")")
+
+custom_x_labs_elec[[1]] <- "30%"
+custom_x_labs_gas[[1]] <- "20%"
+
+
+make_dual_tier_plot <- function(df, x_breaks, custom_x_labs) {
+  # Create dual-axis plot showing impact of discount rates on both tiers
+  # X-axis shows:
+  # - Primary: Discount rate for lowest tier
+  # - Secondary: Corresponding middle tier rate (average of lowest and current)
+  df |>
+    filter(heap_tier %in% c("middle tier", "lowest tier")) |>
+    summarise(
+      .by = c(fuel_type, discount_rate_lowest, heap_tier),
+      below_target = sum(burden < default_target_burden) / n()
+    ) |>
+    mutate(discount_plt_lab = case_when(
+    discount_rate_lowest == current_discount_rate_elec & fuel_type == "Electricity" ~ paste0(scales::percent(discount_rate_lowest, accuracy = 1), " discount\n(current)"),
+    discount_rate_lowest == current_discount_rate_gas & fuel_type == "Gas" ~ paste0(scales::percent(discount_rate_lowest, accuracy = 1), " discount\n(current)"),
+    .default = paste0(scales::percent(discount_rate_lowest, accuracy = 1), " discount")
+  )) |>
+    ggplot(aes(x = discount_rate_lowest, y = below_target, color = heap_tier)) +
+    geom_line() +
+    geom_point() +
+    # Add line labels at the end of each line
+    geom_text_repel(
+      data = . %>% 
+        group_by(fuel_type, heap_tier) %>% 
+        filter(discount_rate_lowest == max(discount_rate_lowest)),
+      aes(label = heap_tier),
+      size = 5,
+      fontface = "bold",
+      direction = "y",
+      hjust = 0,
+      nudge_x = -0.13,
+      segment.color = NA
+    ) +
+     ggrepel::geom_text_repel(
+        data = . %>% filter(heap_tier == "middle tier",
+          (fuel_type == "Electricity" & discount_rate_lowest %in% current_discount_rate_elec) |
+            (fuel_type == "Gas" & discount_rate_lowest %in% current_discount_rate_gas)
+        ),
+        aes(label = discount_plt_lab),
+        size = 4, color = "black",
+        # nudge_x = -20,
+        nudge_y = 0.05,
+        segment.color = "gray50",
+        segment.size = 0.5,
+        box.padding = 0.5,
+        point.padding = 0.2,
+        max.overlaps = 20
+      ) +
+    scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1), limits = c(0, 1)) +
+    scale_x_continuous(
+      limits = c(min(x_breaks), 1),
+      breaks = x_breaks,
+      labels = function(x) {
+        # Create custom labels for each break value
+        # You can manually override these labels here
+        custom_labels <- custom_x_labs
+        names(custom_labels) <- x_breaks
+        custom_labels[as.character(x)]
+      }
+    ) +
+    scale_color_manual(values = heap_tier_colors) +
+    labs(x = "Discount rate for lowest tier \n (Discount rate for middle tier)", y = "Percent of households below target energy burden", color = "HEAP tier") +
+    facet_wrap(~fuel_type) +
+    theme(legend.position = "none")
+}
+
+
+dual_elec <- annual_energy_burdens_elec |>
+  make_dual_tier_plot(x_breaks_elec, custom_x_labs_elec)
+
+dual_gas <- annual_energy_burdens_gas |>
+  make_dual_tier_plot(x_breaks_gas, custom_x_labs_gas)
+
+
+
+```
+
+```{r}
+#| label: fig-discount-rate-vs-percentile-below-target-middle-and-lowest-tier-elec
+#| fig-cap: "Percent of lowest and middle tier LMI households below target Electricity burden vs. discount rate for the lowest tier and middle tier (second row of x axis labels)"
+#| fig-width: 10
+#| out-width: 80%
+dual_elec
+
+```
+
+```{r}
+#| label: fig-discount-rate-vs-percentile-below-target-middle-and-lowest-tier-gas
+#| fig-cap: "Percent of lowest and middle tier LMI households below target gas burden vs. discount rate for the lowest tier and middle tier (second row of x axis labels)"
+#| fig-width: 10
+#| out-width: 80%
+dual_gas
+
+```
+
+
+
+```{r}
+#| label: fig-discount-rate-vs-area-lowest-tier
+#| fig-cap: "Percent of lowest tier households below 2%, 4% and 6% energy burden for a range of discount rates applied to the lowest tier"
+#| fig-width: 12
+#| fig-height: 7
+annual_energy_burdens_elec |>
+  filter(heap_tier == "lowest tier") |>
+  bind_rows(annual_energy_burdens_gas |>
+    filter(heap_tier == "lowest tier")) |>
+  summarise(
+    .by = c(fuel_type, discount_rate_lowest),
+    # below_1_pct = sum(burden < 0.01) / n(),
+    below_2_pct = sum(burden < 0.02) / n(),
+    # below_3_pct = sum(burden < 0.03) / n(),
+    below_4_pct = sum(burden < 0.04) / n(),
+    # below_5_pct = sum(burden < 0.05) / n(),
+    below_6_pct = sum(burden < 0.06) / n()
+  ) |>
+  pivot_longer(cols = starts_with("below_"), names_to = "burden", values_to = "proportion") |>
+  ggplot() +
+  geom_area(
+    aes(
+      x = discount_rate_lowest, y = proportion,
+      fill = fct_relevel(burden, "below_6_pct", "below_4_pct", "below_2_pct")
+    ),
+    position = "identity"
+  ) +
+  geom_vline(
+    data = . %>% filter(
+      (fuel_type == "Electricity" & discount_rate_lowest %in% current_discount_rate_elec) |
+        (fuel_type == "Gas" & discount_rate_lowest %in% current_discount_rate_gas)
+    ),
+    aes(xintercept = discount_rate_lowest),
+    linetype = "dashed", color = "black"
+  ) +
+  geom_text(
+      data = . %>% filter(burden == "below_2_pct",
+        (fuel_type == "Electricity" & discount_rate_lowest %in% current_discount_rate_elec) |
+          (fuel_type == "Gas" & discount_rate_lowest %in% current_discount_rate_gas)
+      ),
+    aes(
+      x = discount_rate_lowest, y = 0.85,
+      label = paste0("Current rate: ", scales::percent(discount_rate_lowest, accuracy = 1))
+    ),
+    color = "black",
+    vjust = 0,
+    hjust = -0.1
+  ) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1), breaks = seq(0.2, 1, 0.1), expand = expansion(mult = c(0.08,0))) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1), breaks = seq(0, 1, 0.1), expand = c(0, 0)) +
+  scale_fill_manual(
+    values = c("below_2_pct" = sb_colors[["sky"]], "below_4_pct" = sb_colors[["pistachio"]], "below_6_pct" = sb_colors[["saffron"]]),
+    labels = c("below_2_pct" = "< 2%", "below_4_pct" = "< 4%", "below_6_pct" = "< 6%"),
+    guide = guide_legend(reverse = TRUE)
+  ) +
+  facet_wrap(~fuel_type, scales = "free_x") +
+  labs(x = "Discount rate (lowest tier)", y = "Percent of lowest tier households", fill = "Energy burden of lowest tier") +
+  theme(legend.position = "top", legend.justification = "left")
+
+```
+
+
+### Figure 4: Middle Tier Energy Burden Analysis
+Shows the distribution of energy burdens for middle tier households at different discount rates
+Key findings:
+  - Shows how middle tier households are affected by the discount rate structure
+  - Demonstrates the relationship between lowest tier and middle tier discount rates
+
+```{r}
+#| label: fig-discount-rate-vs-area-middle-tier
+#| fig-cap: "Percent of middle tier households below 2%, 4% and 6% energy burden for a range of discount rates. The x axis shows the discount rate for the lowest tier and the second row of x axis labels shows the discount rate for the middle tier."
+#| fig-width: 12
+#| fig-height: 7
+
+
+# annual_energy_burdens_elec |>
+#   filter(heap_tier == "middle tier") |>
+#   bind_rows(annual_energy_burdens_gas |>
+#     filter(heap_tier == "middle tier")) |>
+
+plot_area_chart_middle_tier <- function(df, x_breaks, custom_x_labs, current_discount_rate) {
+  df |>
+    filter(heap_tier == "middle tier") |>
+    summarise(
+      .by = c(fuel_type, discount_rate_lowest),
+      # below_1_pct = sum(burden < 0.01) / n(),
+      below_2_pct = sum(burden < 0.02) / n(),
+      # below_3_pct = sum(burden < 0.03) / n(),
+      below_4_pct = sum(burden < 0.04) / n(),
+      # below_5_pct = sum(burden < 0.05) / n(),
+      below_6_pct = sum(burden < 0.06) / n()
+    ) |>
+    pivot_longer(cols = starts_with("below_"), names_to = "burden", values_to = "proportion") |>
+    ggplot() +
+    geom_area(aes(x = discount_rate_lowest, y = proportion, fill = fct_relevel(burden, "below_6_pct", "below_4_pct", "below_2_pct")), position = "identity") +
+    # scale_x_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0.2, 1), breaks = seq(0.2, 1, 0.1)) +
+    scale_x_continuous(
+      limits = c(min(x_breaks), 1),
+      breaks = x_breaks,
+      labels = function(x) {
+        # Create custom labels for each break value
+        # You can manually override these labels here
+        custom_labels <- custom_x_labs
+        names(custom_labels) <- x_breaks
+        custom_labels[as.character(x)]
+      }
+    ) +
+    geom_vline(xintercept = current_discount_rate, linetype = "dashed", color = "black") +
+    geom_text(
+      aes(
+        x = current_discount_rate, y = 0.85,
+        label = paste0("Current rate: ", scales::percent(current_discount_rate, accuracy = 1))
+      ),
+      color = "black",
+      vjust = 0,
+      hjust = -0.1
+    ) +
+    scale_y_continuous(labels = scales::percent, limits = c(0, 1), breaks = seq(0, 1, 0.1), expand = c(0, 0)) +
+    scale_fill_manual(
+      values = c("below_2_pct" = sb_colors[["sky"]], "below_4_pct" = sb_colors[["pistachio"]], "below_6_pct" = sb_colors[["saffron"]]),
+      labels = c("below_2_pct" = "< 2%", "below_4_pct" = "< 4%", "below_6_pct" = "< 6%"),
+      guide = guide_legend(reverse = TRUE)
+    ) +
+    facet_wrap(~fuel_type) +
+    labs(x = "Discount rate for lowest tier \n (Discount rate for middle tier)", y = "Percent of middle tier households", fill = "Energy burden of middle tier") +
+    theme(legend.position = "top")
+}
+
+mid_area_elec <- annual_energy_burdens_elec |>
+  plot_area_chart_middle_tier(x_breaks_elec, custom_x_labs_elec, current_discount_rate_elec)
+
+mid_area_gas <- annual_energy_burdens_gas |>
+  plot_area_chart_middle_tier(x_breaks_gas, custom_x_labs_gas, current_discount_rate_gas) +
+  labs(y = " ") +
+  theme(legend.position = "none")
+
+mid_area_elec + mid_area_gas
+
+```
+
+
+### Figure 5: Overall LMI Impact Analysis
+Shows how discount rates affect the entire LMI population
+Key findings:
+  - Demonstrates aggregate impact across all LMI tiers
+  - Shows overall program effectiveness at different discount levels
+
+```{r}
+#| label: fig-discount-rate-vs-percentile-below-target-all-lmi
+#| fig-cap: "Percent of all LMI households below target energy burden vs. discount rate for the lowest tier"
+#| fig-width: 10
+annual_energy_burdens_elec |>
+  filter(heap_tier != "not LMI") |>
+  bind_rows(annual_energy_burdens_gas |>
+    filter(heap_tier != "not LMI")) |>
+  summarise(
+    .by = c(fuel_type, discount_rate_lowest),
+    below_target = sum(burden < default_target_burden) / n()
+  ) |>
+  mutate(discount_plt_lab = case_when(
+    discount_rate_lowest == current_discount_rate_elec & fuel_type == "Electricity" ~ paste0(scales::percent(discount_rate_lowest, accuracy = 1), " discount\n(current)"),
+    discount_rate_lowest == current_discount_rate_gas & fuel_type == "Gas" ~ paste0(scales::percent(discount_rate_lowest, accuracy = 1), " discount\n(current)"),
+    .default = paste0(scales::percent(discount_rate_lowest, accuracy = 1), " discount")
+  )) |>
+  ggplot(aes(x = discount_rate_lowest, y = below_target, color = fuel_type)) +
+  geom_line() +
+  geom_point() +
+  ggrepel::geom_text_repel(
+    data = . %>% filter(
+      (fuel_type == "Electricity" & discount_rate_lowest %in% current_discount_rate_elec) |
+        (fuel_type == "Gas" & discount_rate_lowest %in% current_discount_rate_gas)
+    ),
+    aes(label = discount_plt_lab),
+    size = 4, color = "black",
+    # nudge_x = -20,
+    nudge_y = 0.05,
+    segment.color = "gray50",
+    segment.size = 0.5,
+    box.padding = 0.5,
+    point.padding = 0.2,
+    max.overlaps = 20
+  ) +
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.05), limits = c(0, 0.5)) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0.2, 1), breaks = seq(0.2, 1, 0.1)) +
+  scale_color_manual(values = fuel_colors) +
+  labs(x = "Discount rate for lowest tier", y = "Percent of all LMI households below target energy burden") +
+  facet_wrap(~fuel_type)+
+  theme(legend.position = "none")
+```
+
+### Figure 6: Lowest Tier Target Achievement
+Shows how different discount rates affect target achievement for lowest-income households
+Key findings:
+  - Tracks progress toward target energy burden
+  - Highlights effectiveness of different discount levels
+
+```{r}
+#| label: fig-discount-rate-vs-percentile-below-target
+#| fig-cap: "Percent of lowest-income HEAP tier households below target energy burden vs. discount rate"
+#| fig-width: 10
+ggplot(results_all, aes(x = discount_rate_lowest, y = percentile_below_target, color = fuel_type)) +
+  geom_line() +
+  geom_point() +
+  ggrepel::geom_text_repel(
+    data = filter(
+      results_all,
+      (fuel_type == "Electricity" & discount_rate_lowest %in% current_discount_rate_elec) |
+        (fuel_type == "Gas" & discount_rate_lowest %in% current_discount_rate_gas)
+    ),
+    aes(label = discount_plt_lab),
+    size = 4, color = "black",
+    # nudge_x = -20,
+    nudge_y = 0.05,
+    segment.color = "gray50",
+    segment.size = 0.5,
+    box.padding = 0.5,
+    point.padding = 0.2,
+    max.overlaps = 20
+  ) +
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0.2, 1), breaks = seq(0.2, 1, 0.1)) +
+  scale_color_manual(values = fuel_colors) +
+  labs(x = "Discount rate", y = "Percent below target energy burden") +
+  facet_wrap(~fuel_type)+
+  theme(legend.position = "none")
+
+
+```
+
+### Figure 7: Cost Impact Analysis
+Shows the relationship between program effectiveness and cost to non-LMI customers
+Key findings:
+  - Illustrates trade-off between target achievement and program costs
+  - Helps identify optimal discount rates balancing benefits and costs
+
+```{r}
+# Define plot labels
+discount_rate_txt_labels_elec <- c(current_discount_rate_elec, max_discount_rate, seq(0.20, 1, 0.20))
+discount_rate_txt_labels_gas <- c(current_discount_rate_gas, max_discount_rate, seq(0.20, 1, 0.20))
+```
+
+
+
+```{r}
+#| label: fig-avg-non-LMI-increase-below-target
+#| fig-cap: "Percentile of lowest-income HEAP tier households below target energy burden vs. average non-LMI annual bill increase. The annotation shows the corresponding discount rate."
+#| fig-height: 7
+#| fig-width: 10
+#| out-height: 70%
+ggplot(results_all, aes(x = avg_non_LMI_increase_marginal, y = percentile_below_target, color = fuel_type)) +
+  geom_line() +
+  geom_point() +
+  ggrepel::geom_text_repel(
+    data = filter(results_all, 
+      (fuel_type == "Electricity" & discount_rate_lowest %in% discount_rate_txt_labels_elec) |
+      (fuel_type == "Gas" & discount_rate_lowest %in% discount_rate_txt_labels_gas)
+    ),
+    aes(label = discount_plt_lab),
+    size = 3.5, color = "black",
+    nudge_x = -20,
+    nudge_y = 0.05,
+    segment.color = "gray50",
+    segment.size = 0.5,
+    box.padding = 0.5,
+    point.padding = 0.2,
+    max.overlaps = 20
+  ) +
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  scale_x_continuous(labels = scales::dollar_format(accuracy = 1), expand = expansion(mult = c(0, 0.1))) +
+  scale_color_manual(values = fuel_colors) +
+  labs(x = "Average non-LMI annual bill increase", y = "Percent below target energy burden") +
+  facet_wrap(~fuel_type)+
+theme(legend.position = "none")
+```
+
+
+```{r}
+ggplot(results_all, aes(x = marginal_cost_per_kwh, y = percentile_below_target, color = discount_rate_lowest)) +
+  geom_line() +
+  geom_point() +
+  ggrepel::geom_text_repel(
+    data = filter(results_all, 
+      (fuel_type == "Electricity" & discount_rate_lowest %in% discount_rate_txt_labels_elec) |
+      (fuel_type == "Gas" & discount_rate_lowest %in% discount_rate_txt_labels_gas)
+    ),
+    aes(label = paste0(scales::percent(discount_rate_lowest, accuracy = 1), " discount")),
+    size = 3, color = "black",
+    segment.color = "gray50",
+    segment.size = 0.5,
+    box.padding = 0.5,
+    point.padding = 0.2,
+    max.overlaps = 20
+  ) +
+  # scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.2)) +
+  # scale_x_continuous(labels = scales::dollar_format(accuracy = 0.01)) +
+  labs(x = "Marginal cost per kWh", y = "Percentile below target energy burden", title = "Percentile below target energy burden vs. marginal cost per kWh") +
+  facet_wrap(~fuel_type)+
+  theme(legend.position = "none")
+```
+
+```{r}
+#| label: fig-discount-rate-vs-marginal-cost-per-kwh
+#| fig-cap: "Marginal cost per kWh vs. discount rate"
+#| fig-width: 10
+
+ggplot(results_all, aes(y = marginal_cost_per_kwh, x = discount_rate_lowest, color = fuel_type)) +
+  geom_line() +
+  geom_point() +
+  ggrepel::geom_text_repel(
+    data = filter(
+      results_all,
+      (fuel_type == "Electricity" & discount_rate_lowest %in% current_discount_rate_elec) |
+        (fuel_type == "Gas" & discount_rate_lowest %in% current_discount_rate_gas)
+    ),
+    aes(label = discount_plt_lab),
+    size = 4, color = "black",
+    # nudge_x = -20,
+    nudge_y = 0.001,
+    segment.color = "gray50",
+    segment.size = 0.5,
+    box.padding = 0.5,
+    point.padding = 0.2,
+    max.overlaps = 20
+  ) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0.2, 1), breaks = seq(0.2, 1, 0.1)) +
+  scale_y_continuous(labels = scales::dollar_format(accuracy = 0.001)) +
+  scale_color_manual(values = fuel_colors) +
+  labs(y = "Marginal cost per kWh", x = "Discount rate") +
+  facet_wrap(~fuel_type) + 
+  theme(legend.position = "none")
+```
+
+```{r}
+#| label: fig-discount-rate-vs-total-cost-per-kwh
+#| fig-cap: "Total program cost per kWh vs. discount rate"
+#| fig-width: 10
+
+ggplot(results_all, aes(y = cost_per_kwh, x = discount_rate_lowest, color = fuel_type)) +
+  geom_line() +
+  geom_point() +
+  ggrepel::geom_text_repel(
+    data = filter(
+      results_all,
+      (fuel_type == "Electricity" & discount_rate_lowest %in% current_discount_rate_elec) |
+        (fuel_type == "Gas" & discount_rate_lowest %in% current_discount_rate_gas)
+    ),
+    aes(label = discount_plt_lab),
+    size = 4, color = "black",
+    # nudge_x = -20,
+    nudge_y = 0.001,
+    segment.color = "gray50",
+    segment.size = 0.5,
+    box.padding = 0.5,
+    point.padding = 0.2,
+    max.overlaps = 20
+  ) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0.2, 1), breaks = seq(0.2, 1, 0.1)) +
+  scale_y_continuous(labels = scales::dollar_format(accuracy = 0.001)) +
+  scale_color_manual(values = fuel_colors) +
+  labs(y = "Cost per kWh (total program cost)", x = "Discount rate") +
+  facet_wrap(~fuel_type)+
+  theme(legend.position = "none")
+```
+
+```{r}
+#| label: fig-percent-increase-program-cost-vs-percentile-below-target
+#| fig-cap: "Percent of lowest-income HEAP tier households below target energy burden vs. percent increase in program cost"
+#| fig-width: 10
+#| fig-height: 7
+
+ggplot(results_all, aes(x = percent_increase_program_cost, y = percentile_below_target, color = fuel_type)) +
+  geom_line() +
+  geom_point() +
+  ggrepel::geom_text_repel(
+    data = filter(
+      results_all,
+      (fuel_type == "Electricity" & discount_rate_lowest %in% discount_rate_txt_labels_elec) |
+        (fuel_type == "Gas" & discount_rate_lowest %in% discount_rate_txt_labels_gas)
+    ),
+    aes(label = discount_plt_lab),
+    size =4, color = "black",
+    segment.color = "gray50",
+    segment.size = 0.5,
+    box.padding = 0.5,
+    point.padding = 0.2,
+    max.overlaps = 20,
+    nudge_x = -0.05,
+    nudge_y = 0.05
+  ) +
+
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1), limits = c(-0.05, 1.4), breaks = seq(0, 2, 0.2), expand = expansion(mult = c(0.1, 0.01))) +
+  scale_color_manual(values = fuel_colors) +
+  labs(x = "Percent increase in program cost", y = "Percentile below target energy burden") +
+  facet_wrap(~fuel_type)+
+  theme(legend.position = "none")
+```
+
+
+```{r}
+#| label: fig-target-pcts-bar-chart
+#| fig-cap: "Distribution of National Grid households by HEAP tier within each fuel type. Customer counts were pulled from the DPU's model assumptions."
+#| fig-height: 6
+#| fig-width: 6
+
+# Calculate positions for gas bar labels
+gas_label_positions <- target_pcts_gas |>
+  arrange(fct_relevel(heap_tier, "not LMI", "highest tier", "middle tier", "lowest tier")) |>
+  mutate(
+    fuel_type = "Gas",
+    # Calculate cumulative percentages for positioning
+    cum_pct = cumsum(target_pct),
+    # Position labels at the center of each segment
+    y_pos = cum_pct - target_pct / 2,
+    # X position slightly to the right of the bar
+    x_pos = 2.5
+  )
+
+target_pcts_elec |>
+  mutate(fuel_type = "Electricity") |>
+  bind_rows(target_pcts_gas |> mutate(fuel_type = "Gas")) |>
+  ggplot(aes(x = fuel_type, y = target_pct, fill = fct_relevel(heap_tier, "lowest tier", "middle tier", "highest tier", "not LMI"))) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(scales::comma(round(n)), " (", scales::percent(target_pct, accuracy = 0.1), ")")),
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    size = 4,
+    fontface = "bold"
+  ) +
+  geom_text(
+    data = gas_label_positions,
+    aes(x = x_pos, y = y_pos, label = heap_tier, color = fct_relevel(heap_tier, "lowest tier", "middle tier", "highest tier", "not LMI")),
+    size = 4.5,
+    fontface = "bold",
+    hjust = 0
+  ) +
+  scale_fill_manual(values = c(heap_tier_colors, "not LMI" = sb_colors[["midnight"]])) +
+  scale_color_manual(values = c(heap_tier_colors, "not LMI" = sb_colors[["midnight"]])) +
+  scale_x_discrete(expand = expansion(mult = c(0, 1))) +
+  labs(x = "", y = "", fill = "HEAP tier") +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank(),
+    panel.grid = element_blank()
+  )
+```
+
+
+```{r}
+#| label: fig-target-pcts-bar-chart-flipped
+#| fig-cap: "Distribution of National Grid households by HEAP tier within each fuel type. Customer counts were pulled from the DPU's model assumptions."
+#| fig-height: 6
+#| fig-width: 6
+#| out-width: 80%
+#| out-height: 60%
+
+# Calculate positions for gas bar labels
+gas_label_positions <- target_pcts_gas |>
+  arrange(fct_relevel(heap_tier, "not LMI", "highest tier", "middle tier", "lowest tier")) |>
+  mutate(
+    fuel_type = "Gas",
+    # Calculate cumulative percentages for positioning
+    cum_pct = cumsum(target_pct),
+    # Position labels at the center of each segment
+    x_pos = cum_pct - target_pct / 2,
+    # X position slightly to the right of the bar
+    y_pos = 2.5
+  )
+
+target_pcts_elec |>
+  mutate(fuel_type = "Electricity") |>
+  bind_rows(target_pcts_gas |> mutate(fuel_type = "Gas")) |>
+  ggplot(aes(y = fuel_type, x = target_pct, fill = fct_relevel(heap_tier, "lowest tier", "middle tier", "highest tier", "not LMI"))) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c(heap_tier_colors, "not LMI" = sb_colors[["midnight"]])) +
+  scale_color_manual(values = c(heap_tier_colors, "not LMI" = sb_colors[["midnight"]])) +
+  # scale_x_discrete(expand = expansion(mult = c(0, 1))) +
+  labs(x = "", y = "", fill = "HEAP tier") +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank(),
+    panel.grid = element_blank()
+  )
+```
+
+# Report variables
+This is where we calculate the summary metrics that are used in the report. Each variable calculated here corresponds to a metric in the report. You can see where they are used in the report by searching for the variable name in Index.qmd.
+```{r}
+# Report variables
+
+pct_below_or_rate <- function(rate = NULL, target_pct = NULL, results, fuel) {
+  # Helper function to find either:
+  # a) % below target at a given discount rate
+  # b) Discount rate needed to achieve a target percentage
+  if (!is.null(rate)) {
+    print("returning rate")
+    out <- results |>
+      filter(fuel_type == fuel, round(discount_rate_lowest, 2) == rate) |>
+      pull(percentile_below_target) |>
+      scales::percent(accuracy = 0.1)
+    return(out)
+  }
+  if (!is.null(target_pct)) {
+    print("returning percent")
+    out <- results |>
+      filter(fuel_type == fuel) |>
+      mutate(diff = abs(percentile_below_target - target_pct)) |>
+      filter(diff == min(diff)) |>
+      pull(discount_rate_lowest) |>
+      scales::percent(accuracy = 1)
+    return(out)
+  }
+}
+
+# Current state metrics
+gas_burden_now <- pct_below_or_rate(rate = current_discount_rate_gas, results = results_all, fuel = "Gas")
+elec_burden_now <- pct_below_or_rate(rate = current_discount_rate_elec, results = results_all, fuel = "Electricity")
+
+elec_burden_now_all_lmi <- annual_energy_burdens_elec |>
+  filter(heap_tier != "not LMI", discount_rate_lowest == current_discount_rate_elec) |>
+  summarise(
+    .by = c(fuel_type, discount_rate_lowest),
+    below_target = sum(burden < default_target_burden) / n()
+  ) |>
+  pull(below_target) |>
+  scales::percent(accuracy = 1)
+
+gas_burden_now_all_lmi <- annual_energy_burdens_gas |>
+  filter(heap_tier != "not LMI", discount_rate_lowest == current_discount_rate_gas) |>
+  summarise(
+    .by = c(fuel_type, discount_rate_lowest),
+    below_target = sum(burden < default_target_burden) / n()
+  ) |>
+  pull(below_target) |>
+  scales::percent(accuracy = 1)
+
+rate_95_pct_below_elec <- pct_below_or_rate(target_pct = 0.95, results = results_all, fuel = "Electricity")
+rate_95_pct_below_gas <- pct_below_or_rate(target_pct = 0.95, results = results_all, fuel = "Gas")
+
+
+rate_60_pct_below_elec <- results_all |>
+  filter(fuel_type == "Electricity", round(discount_rate_lowest, 2) == 0.6) |>
+  pull(percentile_below_target) |>
+  scales::percent(accuracy =1)
+
+
+
+pct_inc_60_elec <- results_all |>
+  filter(fuel_type == "Electricity", round(discount_rate_lowest, 2) == 0.6) |>
+  pull(percent_increase_program_cost) |>
+  max() |>
+  scales::percent(accuracy = 1)
+
+
+avg_annual_cost_95_below <- results_all |>
+  mutate(
+    diff = abs(percentile_below_target - 0.95),
+    avg_non_LMI_increase = scales::dollar(avg_non_LMI_increase_marginal, accuracy = 1)
+  ) |>
+  filter(diff == min(diff), .by = fuel_type) |>
+  select(fuel_type, avg_non_LMI_increase_marginal) |>
+  mutate(avg_non_LMI_increase_marginal = scales::dollar(avg_non_LMI_increase_marginal, accuracy = 1)) |>
+  deframe()
+
+
+max_discount_rate_middle_tier_gas <- scales::percent((max_discount_rate + current_discount_rate_gas) / 2, accuracy = 1)
+max_discount_rate_middle_tier_elec <- scales::percent((max_discount_rate + current_discount_rate_elec) / 2, accuracy = 1)
+
+pct_middle_below_max_gas <- annual_energy_burdens_gas |>
+  filter(heap_tier == "middle tier", discount_rate_lowest == max_discount_rate) |>
+  summarise(
+    .by = c(fuel_type, discount_rate_lowest),
+    below_target = sum(burden < default_target_burden) / n()
+  ) |>
+  pull(below_target) |>
+  scales::percent(accuracy = 1)
+
+pct_middle_below_max_elec <- annual_energy_burdens_elec |>
+  filter(heap_tier == "middle tier", discount_rate_lowest == max_discount_rate) |>
+  summarise(
+    .by = c(fuel_type, discount_rate_lowest),
+    below_target = sum(burden < default_target_burden) / n()
+  ) |>
+  pull(below_target) |>
+  scales::percent(accuracy = 1)
+
+max_pct_increase_cost_elec <- results_all |>
+  filter(fuel_type == "Electricity") |>
+  pull(percent_increase_program_cost) |>
+  max() |>
+  scales::percent(accuracy = 1)
+
+max_pct_increase_cost_gas <- results_all |>
+  filter(fuel_type == "Gas") |>
+  pull(percent_increase_program_cost) |>
+  max() |>
+  scales::percent(accuracy = 1)
+
+
+max_dollar_increase_cost_elec <- results_all |>
+  filter(fuel_type == "Electricity") |>
+  pull(avg_non_LMI_increase_marginal) |>
+  max() |>
+  scales::dollar(accuracy = 1)
+
+max_dollar_increase_cost_gas <- results_all |>
+  filter(fuel_type == "Gas") |>
+  pull(avg_non_LMI_increase_marginal) |>
+  max() |>
+  scales::dollar(accuracy = 1)
+
+```
+
+```{r}
+# tables for report
+
+elec_tariff_table <- elec_tariff |>
+  mutate(
+    utility = "National Grid",
+    year = case_when(month %in% c(1:6) ~ "2025",
+      .default = "2024"
+    )
+  ) |>
+  distinct(utility,year, customer_charge, volumetric_rate, current_discount) |>
+  mutate(
+    customer_charge = scales::dollar(customer_charge, accuracy = 0.01),
+    volumetric_rate = scales::dollar(volumetric_rate, accuracy = 0.0001),
+    current_discount = scales::percent(current_discount, accuracy = 1)
+  ) |>
+  rename(
+    "Utility" = utility,
+    "Year" = year,
+    "Customer Charge ($/month)" = customer_charge,
+    "Volumetric Rate ($/kWh)" = volumetric_rate,
+    "Current Discount" = current_discount
+  )
+
+gas_tariff_table <- gas_tariff |>
+  mutate(
+    utility = "National Grid",
+    season = case_when(month %in% c(5:10) ~ "Summer",
+      .default = "Winter"
+    )
+  ) |>
+  distinct(utility, season, customer_charge, volumetric_rate, current_discount) |>
+  mutate(
+    customer_charge = scales::dollar(customer_charge, accuracy = 0.01),
+    volumetric_rate = scales::dollar(volumetric_rate, accuracy = 0.0001),
+    current_discount = scales::percent(current_discount, accuracy = 1)
+  ) |>
+  rename(
+    "Utility" = utility,
+    "Season" = season,
+    "Customer Charge ($/month)" = customer_charge,
+    "Volumetric Rate ($/kWh)" = volumetric_rate,
+    "Current Discount" = current_discount
+  )
+
+```
+
+```{r}
+#lowest tier lims table
+
+lowest_tier_lims <- low_income_thresholds |>
+filter(note== "100% FPL", occupants_min %in% 2:5) |>
+select(occupants_min, income_threshold_upper) |>
+mutate(income_threshold_upper = scales::dollar(income_threshold_upper, accuracy = 1)) |>
+rename("Household Size" = occupants_min, "Income Limit" = income_threshold_upper) 
+```
+
+```{r}
+# Export all tables and variables to a file that can be used in the index.qmd report
+save.image(file = "/workspaces/reports/src/ma_lmi_discounts/report_variables.RData")
+
+```
